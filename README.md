@@ -9,7 +9,7 @@ A dynamic and interactive music visualizer built with Zig and Raylib. Experience
 
 * **Drag-and-drop Simplicity:** Easily load your MP3 files directly into the visualizer.
 * **Intuitive Playback Control:** Pause, restart, and switch songs effortlessly.
-* **Customizable Visualizations:** Explore different visualization settings for unique experiences  ( *Consider adding more details if you have customization features*) 
+* **Customizable Visualizations:** Explore different visualization settings for unique experiences 
 * **Hotkey Shortcuts:** Conveniently navigate and control the visualizer with keyboard shortcuts.
 
 **Installation**

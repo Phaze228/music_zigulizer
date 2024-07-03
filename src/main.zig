@@ -7,9 +7,9 @@ const rl = @cImport({
 const Complex = std.math.Complex;
 const I = Complex(f32).init(0, -1);
 const PI_CPLX = Complex(f32).init(std.math.pi, 0);
-const FFT_SIZE: usize = math.pow(i32, 2, 13);
-const FFT_SIZE_FLOAT: f32 = math.pow(f32, 2.0, 13);
-const SAMPLE_RATE: usize = 44100;
+const FFT_SIZE: usize = math.pow(i32, 2, 11);
+const FFT_SIZE_FLOAT: f32 = math.pow(f32, 2.0, 11);
+const SAMPLE_RATE: usize = 48000;
 // const SAMPLE_RATE_FLOAT: f32 = 44100;
 const MAX_FREQUENCY_BINS: usize = SAMPLE_RATE / 2;
 const MAIN_LABEL = "Drop files to begin";
@@ -57,7 +57,7 @@ pub fn main() !void {
     const text_width: f32 = @floatFromInt(TEXT_WIDTH);
     const text_height: f32 = @floatFromInt(TEXT_HEIGHT);
     std.debug.print("Sample Rate: {d}\n ", .{music.stream.sampleRate});
-    const cell_width: f32 = 44100.0 / FFT_SIZE_FLOAT / 2;
+    const cell_width: f32 = SAMPLE_RATE / FFT_SIZE_FLOAT / 2;
     while (!rl.WindowShouldClose()) {
         rl.BeginDrawing();
         rl.ClearBackground(BACKGROUND_COLOR);
@@ -191,7 +191,7 @@ pub fn getFreqs_2(buf: ?*anyopaque, frames: u32) callconv(.C) void {
 
 pub fn fft(input_samples: []f32, output_frequencies: []Complex(f32), sample_count: usize) void {
     var step: usize = 1;
-    var r: usize = @intFromFloat(@floor(@log2(@as(f32, @floatFromInt(sample_count)))));
+    const r: usize = @intFromFloat(@floor(@log2(@as(f32, @floatFromInt(sample_count)))));
     var l: usize = 0;
     var k: usize = 0;
     var p: usize = 0;
@@ -250,7 +250,7 @@ pub fn normalizeAmp(freqs: []Complex(f32), f_amps: []f32) void {
 
     for (freqs, 0..) |f, i| {
         if (i == FFT_SIZE / 2) break;
-        var power: f32 = @log10(f.re * f.re + f.im * f.im);
+        const power: f32 = @log10(f.re * f.re + f.im * f.im);
         // var power: f32 = f.magnitude();
         // std.debug.print("{d}:{d}\n", .{ i, power });
         f_amps[i] = power / max_amp;
@@ -284,9 +284,9 @@ pub fn getMaxPower(freqs: []Complex(f32)) f32 {
 
 pub fn getRMSPower(freqs: []f32, start: usize, end: usize) f32 {
     var rms: f32 = 0;
-    var f_len: f32 = @floatFromInt(freqs.len);
+    const f_len: f32 = @floatFromInt(freqs.len);
     var q = start;
-    var e = if (end > freqs.len) freqs.len - 1 else end;
+    const e = if (end > freqs.len) freqs.len - 1 else end;
     while (q < e) : (q += 1) {
         rms += freqs[q] * freqs[q];
     }
@@ -297,7 +297,7 @@ pub fn getRMSPower(freqs: []f32, start: usize, end: usize) f32 {
 pub fn getAvgPower(freqs: []f32, start: usize, end: usize) f32 {
     var avg_power: f32 = 0;
     var q = start;
-    var e = if (end > freqs.len) freqs.len - 1 else end;
+    const e = if (end > freqs.len) freqs.len - 1 else end;
     while (q < e) : (q += 1) {
         avg_power += freqs[q];
     }

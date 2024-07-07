@@ -12,181 +12,232 @@ const FFT_SIZE_FLOAT: f32 = math.pow(f32, 2.0, 11);
 const SAMPLE_RATE: usize = 48000;
 // const SAMPLE_RATE_FLOAT: f32 = 44100;
 const MAX_FREQUENCY_BINS: usize = SAMPLE_RATE / 2;
+const RESOLUTION: f32 = SAMPLE_RATE / FFT_SIZE_FLOAT / 2;
 const MAIN_LABEL = "Drop files to begin";
 const BACKGROUND_COLOR = rl.CLITERAL(rl.Color{ .r = 0x17, .g = 0x17, .b = 0x17, .a = 0x12 });
 const LOW_FREQ: f32 = 1.0;
 // This frequency step is generated from 2 * (frequency_step) ^ width = usable_frequencies
 // So for our current configuration it's 2 * f_step ^ 600 = 24000
 // Do some log math.... log(12000)/600 = log(x) => 10^(log(12000)/600) = x
+const WIDTH: f32 = 600.0;
+const HEIGHT: f32 = 800.0;
+const FREQ_STEP: f32 = (SAMPLE_RATE / 2) / (RESOLUTION * WIDTH);
 const FREQUENCY_STEP: f32 = 1.06;
-const DEFAULT_MUSIC_VOLUME: f32 = 0.01;
+const DEFAULT_MUSIC_VOLUME: f32 = 0.02;
 
 var loop_counter: usize = 0;
 var time_start: i64 = 0;
 var time_end: i64 = 0;
 var prev_pow: f32 = 0;
 
-var music: rl.Music = undefined;
-var dropped_files: rl.FilePathList = undefined;
+pub const Direction = enum { Previous, Next };
+
+const Config = struct {
+    background_color: rl.Color = BACKGROUND_COLOR,
+    sample_rate: usize = SAMPLE_RATE,
+};
 
 const Sample = struct {
     chan1: f32,
     chan2: f32,
 };
 
-var global_frames: [FFT_SIZE]f32 = std.mem.zeroes([FFT_SIZE]f32);
-var global_windowed_frames: [FFT_SIZE]f32 = std.mem.zeroes([FFT_SIZE]f32);
-var global_frame_count: usize = 0;
-// var global_frames: [FFT_SIZE]Sample = std.mem.zeroes([FFT_SIZE]Sample);
-var global_freqs: [FFT_SIZE]Complex(f32) = std.mem.zeroes([FFT_SIZE]Complex(f32));
-var global_amps: [FFT_SIZE / 2]f32 = std.mem.zeroes([FFT_SIZE / 2]f32);
-var last_frames_amp: [FFT_SIZE]f32 = undefined;
+const Container = struct {
+    const Self = @This();
+    frames: [FFT_SIZE]f32,
+    windowed: [FFT_SIZE]f32,
+    frequencies: [FFT_SIZE]Complex(f32),
+    amplitudes: [FFT_SIZE / 2]f32,
+    last_amp: [FFT_SIZE]f32,
+    count: usize = 0,
+
+    pub fn print_magnitudes(self: *Self) void {
+        for (self.amplitudes, 0..) |value, i| {
+            std.debug.print("{d}: {d}, ", .{ i, value });
+        }
+        std.debug.print("\n", .{});
+    }
+};
+
+const TextConfig = struct {
+    const Self = @This();
+    height: i32 = 69,
+    width: i32,
+
+    pub fn heightAsFloat(self: *Self) f32 {
+        return @as(f32, @floatFromInt(self.height));
+    }
+
+    pub fn widthAsFloat(self: *Self) f32 {
+        return @as(f32, @floatFromInt(self.height));
+    }
+};
+
+var global_container = std.mem.zeroes(Container);
 
 pub fn main() !void {
+    var music = Music{ .callback = &getFreqs };
     rl.InitAudioDevice();
     rl.InitWindow(800, 600, "Zigulizer");
     defer rl.CloseAudioDevice();
-    rl.SetTargetFPS(60);
-    @memset(&last_frames_amp, 1);
-    var files: rl.FilePathList = std.mem.zeroes(rl.FilePathList);
-    var file: ?[*c]const u8 = null; // "src/tacw.mp3";
-    const h: f32 = @floatFromInt(rl.GetRenderHeight());
-    const w: f32 = @floatFromInt(rl.GetRenderWidth());
+    rl.SetTargetFPS(30);
+    @memset(&global_container.last_amp, 1);
+    const window_height: f32 = @floatFromInt(rl.GetRenderHeight());
+    const window_width: f32 = @floatFromInt(rl.GetRenderWidth());
     const TEXT_HEIGHT: i32 = 69;
     const TEXT_WIDTH: i32 = rl.MeasureText(MAIN_LABEL, TEXT_HEIGHT);
     const text_width: f32 = @floatFromInt(TEXT_WIDTH);
     const text_height: f32 = @floatFromInt(TEXT_HEIGHT);
-    std.debug.print("Sample Rate: {d}\n ", .{music.stream.sampleRate});
-    const cell_width: f32 = SAMPLE_RATE / FFT_SIZE_FLOAT / 2;
+    // const cell_width: f32 = SAMPLE_RATE / FFT_SIZE_FLOAT / 2;
     while (!rl.WindowShouldClose()) {
         rl.BeginDrawing();
         rl.ClearBackground(BACKGROUND_COLOR);
         if (rl.IsFileDropped()) {
-            files = rl.LoadDroppedFiles();
-            setMusicFile(&files, &file);
+            music.initialize(rl.LoadDroppedFiles());
         }
-        if (!rl.IsMusicReady(music)) rl.DrawText(MAIN_LABEL, @intFromFloat(w / 2 - text_width / 2), @intFromFloat(h / 2 - text_height / 2), text_height, rl.WHITE);
-        if (!rl.IsMusicReady(music) and file != null) {
-            loadMusic(&music, file);
+        if (!music.isReady()) {
+            rl.DrawText(MAIN_LABEL, @intFromFloat(window_width / 2 - text_width / 2), @intFromFloat(window_height / 2 - text_height / 2), text_height, rl.WHITE);
+            if (music.current_file) |_| {
+                music.load();
+            }
         }
-        if (rl.IsMusicReady(music)) {
-            rl.UpdateMusicStream(music);
-            drawFFT(&global_amps, cell_width, h, w);
+        if (music.isReady()) {
+            music.update();
+            renderFFT(&global_container.amplitudes, RESOLUTION, window_height, window_width);
         }
         rl.EndDrawing();
-        if (rl.IsKeyPressed(rl.KEY_SPACE)) pauseMusic(music);
-        if (rl.IsKeyPressed(rl.KEY_R)) restartMusic(music);
-        if (rl.IsKeyPressed(rl.KEY_G)) loadMusic(&music, file);
-        if (rl.IsKeyPressed(rl.KEY_U)) rl.UnloadDroppedFiles(files);
-        if (rl.IsKeyPressed(rl.KEY_F)) listFiles(&files, file);
-        if (rl.IsKeyPressed(rl.KEY_L)) nextMusicFile(&files, &file);
-        if (rl.IsKeyPressed(rl.KEY_H)) prevMusicFile(&files, &file);
+        if (rl.IsKeyPressed(rl.KEY_SPACE)) music.pause();
+        if (rl.IsKeyPressed(rl.KEY_R)) music.restart();
+        if (rl.IsKeyPressed(rl.KEY_G)) music.load();
+        if (rl.IsKeyPressed(rl.KEY_U)) music.unloadFiles();
+        if (rl.IsKeyPressed(rl.KEY_F)) music.listFiles();
+        if (rl.IsKeyPressed(rl.KEY_L)) music.change(Direction.Next);
+        if (rl.IsKeyPressed(rl.KEY_H)) music.change(Direction.Previous);
     }
-    if (rl.IsMusicReady(music)) rl.DetachAudioStreamProcessor(music.stream, getFreqs);
+    if (music.isReady()) music.detach();
 }
 // [][*c]const u8
-pub fn setMusicFile(file_paths: *rl.FilePathList, f: *?[*c]const u8) void {
-    const files = file_paths.paths;
-    if (file_paths.count < 1) {
+const Music = struct {
+    const Self = @This();
+    files: rl.FilePathList = std.mem.zeroes(rl.FilePathList),
+    current_file: ?[*c]const u8 = null,
+    playing: rl.Music = undefined,
+    volume: f32 = DEFAULT_MUSIC_VOLUME,
+    callback: *const fn (buf: ?*anyopaque, frames: u32) callconv(.C) void,
+
+    pub fn initialize(self: *Self, files: rl.FilePathList) void {
+        if (self.files.count >= files.count) return;
+        self.files = files;
+        if (self.current_file) |_| {
+            std.debug.print("---=File is loaded=---\n", .{});
+            return;
+        } else {
+            std.debug.print("Loading\n", .{});
+            self.current_file = self.files.paths[0];
+        }
+    }
+
+    pub fn isReady(self: *Self) bool {
+        return rl.IsMusicReady(self.playing);
+    }
+
+    pub fn isPlaying(self: *Self) bool {
+        return rl.IsMusicStreamPlaying(self.playing);
+    }
+
+    pub fn update(self: *Self) void {
+        rl.UpdateMusicStream(self.playing);
+    }
+
+    pub fn detach(self: *Self) void {
+        rl.DetachAudioStreamProcessor(self.playing.stream, self.callback);
+    }
+
+    pub fn unloadFiles(self: *Self) void {
+        rl.UnloadDroppedFiles(self.files);
+    }
+
+    pub fn setMusic(self: *Self, new_file: *?[*c]const u8) void {
+        const files = self.files.paths;
+        if (files.count < 1) return;
+        if (new_file.* == null) {
+            new_file.* = files[0];
+        }
+        self.current_file = new_file.*;
+    }
+
+    pub fn load(self: *Self) void {
+        const music_file = self.current_file.?;
+        if (self.isPlaying()) {
+            rl.StopMusicStream(self.playing);
+            rl.DetachAudioStreamProcessor(self.playing.stream, self.callback);
+            rl.UnloadMusicStream(self.playing);
+            self.playing = rl.LoadMusicStream(music_file);
+        } else {
+            self.playing = rl.LoadMusicStream(music_file);
+        }
+        if (self.isReady()) {
+            rl.SetMusicVolume(self.playing, self.volume);
+            rl.PlayMusicStream(self.playing);
+            rl.AttachAudioStreamProcessor(self.playing.stream, self.callback);
+        }
+    }
+
+    pub fn change(self: *Self, direction: Direction) void {
+        if (self.files.count < 2) {
+            return;
+        }
+        var current_place: usize = for (self.files.paths, 0..self.files.count) |file, index| {
+            if (file == self.current_file.?) break index;
+        } else 0;
+        switch (direction) {
+            .Previous => {
+                current_place = @mod(current_place - 1, self.files.count);
+            },
+            .Next => {
+                current_place = @mod(current_place + 1, self.files.count);
+            },
+        }
+        self.current_file = self.files.paths[current_place];
         return;
     }
-    if (f.* == null) f.* = files[0];
-}
-pub fn nextMusicFile(file_paths: *rl.FilePathList, f: *?[*c]const u8) void {
-    std.debug.print("Pressed L\n", .{});
-    const files = file_paths.paths;
-    var i: usize = 0;
-    while (i < file_paths.count) : (i += 1) {
-        if (f.*.? == files[i] and i < file_paths.count - 1) {
-            std.debug.print("Changed:\n{s} -> {s}\n", .{ files[i], files[i + 1] });
-            f.* = files[i + 1];
-            return;
-        } else if (i == file_paths.count - 1) {
-            std.debug.print("End of list:\n{s} -> {s}\n", .{ f.*.?, files[0] });
-            f.*.? = files[0];
-            return;
+
+    pub fn pause(self: *Self) void {
+        if (rl.IsMusicStreamPlaying(self.playing)) rl.PauseMusicStream(self.playing) else rl.PlayMusicStream(self.playing);
+    }
+
+    pub fn restart(self: *Self) void {
+        rl.StopMusicStream(self.playing);
+        rl.PlayMusicStream(self.playing);
+    }
+
+    pub fn listFiles(self: *Self) void {
+        var i: usize = 0;
+        while (i < self.files.count) : (i += 1) {
+            std.debug.print("{s:^5} {d:^5}: {s}\n", .{ "File", i, self.files.paths[i] });
         }
+        std.debug.print("{s} -> {s} \n", .{ "Current File", self.current_file.? });
     }
-}
-pub fn prevMusicFile(file_paths: *rl.FilePathList, f: *?[*c]const u8) void {
-    std.debug.print("Pressed H\n", .{});
-    const files = file_paths.paths;
-    var i: usize = file_paths.count;
-    while (i >= 0) : (i -= 1) {
-        if (f.*.? == files[i] and i > 0) {
-            std.debug.print("Changed:\n{s} -> {s}\n", .{ files[i], files[i - 1] });
-            f.*.? = files[i - 1];
-            return;
-        } else if (i == 0) {
-            std.debug.print("End of list:\n{s} -> {s}\n", .{ f.*.?, files[file_paths.count - 1] });
-            f.*.? = files[file_paths.count - 1];
-            return;
-        }
-    }
-}
-// [*][*c]const u8
-
-pub fn listFiles(file_paths: *rl.FilePathList, f: ?[*c]const u8) void {
-    var i: usize = 0;
-    while (i < file_paths.count) : (i += 1) {
-        std.debug.print("{s:^5} {d:^5}: {s}\n", .{ "File", i, file_paths.paths[i] });
-    }
-    std.debug.print("{s} -> {s} \n", .{ "Current File", f.? });
-}
-
-pub fn loadMusic(m: *rl.Music, f_opt: ?[*c]const u8) void {
-    const f = f_opt.?;
-    // std.debug.print("Optional: {any} || String: {s} \n", .{ f_opt, f });
-    if (rl.IsMusicStreamPlaying(m.*)) {
-        rl.StopMusicStream(m.*);
-        rl.DetachAudioStreamProcessor(m.stream, getFreqs);
-        rl.UnloadMusicStream(m.*);
-        m.* = rl.LoadMusicStream(f);
-    } else m.* = rl.LoadMusicStream(f);
-    if (rl.IsMusicReady(m.*)) {
-        rl.SetMusicVolume(m.*, DEFAULT_MUSIC_VOLUME);
-        rl.PlayMusicStream(m.*);
-        rl.AttachAudioStreamProcessor(m.stream, getFreqs);
-    }
-}
-
-pub fn pauseMusic(m: rl.Music) void {
-    if (rl.IsMusicStreamPlaying(m)) {
-        rl.PauseMusicStream(m);
-    } else {
-        rl.ResumeMusicStream(m);
-    }
-}
-
-pub fn restartMusic(m: rl.Music) void {
-    rl.StopMusicStream(m);
-    rl.PlayMusicStream(m);
-}
+};
 
 // USED FOR JUST GETTING THE FRAME AS IT PASSES
 pub fn getFreqs(buf: ?*anyopaque, frames: u32) callconv(.C) void {
-    const frames_to_copy: usize = @min(FFT_SIZE - global_frame_count, frames - 1);
-    const samples: *[441][2]f32 = @alignCast(@ptrCast(buf.?));
+    const frames_to_copy: usize = @min(FFT_SIZE - global_container.count, frames - 1);
+    const samples: *[512][2]f32 = @alignCast(@ptrCast(buf.?));
     for (samples, 0..) |samp, i| {
-        const idx: usize = (i + global_frame_count) % (FFT_SIZE - 1);
-        global_frames[idx] = samp[0];
+        const idx: usize = (i + global_container.count) % (global_container.frames.len);
+        global_container.frames[idx] = samp[0];
     }
 
-    global_frame_count = (global_frame_count + frames_to_copy) % FFT_SIZE;
-    hamming_window(&global_frames, &global_windowed_frames);
-    fft(&global_windowed_frames, &global_freqs, FFT_SIZE);
-    normalizeAmp(&global_freqs, &global_amps);
-}
+    global_container.count += (global_container.count + frames_to_copy) % FFT_SIZE;
 
-pub fn getFreqs_2(buf: ?*anyopaque, frames: u32) callconv(.C) void {
-    const samples: *[441][2]f32 = @alignCast(@ptrCast(buf.?));
-    _ = frames;
-    for (samples, 0..) |sample, i| {
-        global_frames[i] = sample[0];
+    if (global_container.count >= global_container.frames.len) {
+        global_container.count = 0;
+        hamming_window(&global_container.frames, &global_container.windowed);
+        fft(&global_container.windowed, &global_container.frequencies, FFT_SIZE);
+        normalizeFFT(&global_container.frequencies, &global_container.amplitudes);
+        // global_container.print_magnitudes();
     }
-    hamming_window(&global_frames, &global_windowed_frames);
-    fft(&global_windowed_frames, &global_freqs, FFT_SIZE);
-    normalizeAmp(&global_freqs, &global_amps);
 }
 
 pub fn fft(input_samples: []f32, output_frequencies: []Complex(f32), sample_count: usize) void {
@@ -201,8 +252,8 @@ pub fn fft(input_samples: []f32, output_frequencies: []Complex(f32), sample_coun
         output_frequencies[l] = Complex(f32).init(input_samples[k], 0);
     }
 
-    var twiddle: Complex(f32) = undefined;
-    var twid: Complex(f32) = undefined;
+    var twiddle: Complex(f32) = std.mem.zeroes(Complex(f32));
+    var twid: Complex(f32) = std.mem.zeroes(Complex(f32));
     k = 0;
     while (k < r) : (k += 1) {
         l = 0;
@@ -257,12 +308,12 @@ pub fn normalizeAmp(freqs: []Complex(f32), f_amps: []f32) void {
     }
 }
 
-pub fn printFFT(freqs: []Complex(f32), sample_rate: usize, fft_size: usize) void {
-    const freq_multiple: usize = sample_rate / fft_size;
-    std.debug.print("{s:^15} | {s:^15} | {s:^15} | {s:^15}\n", .{ "Frequency", "Real", "Imaginary", "Power" });
-    for (freqs, 0..) |f, i| {
-        if (i > fft_size / 2) break;
-        std.debug.print("{d:^10}Hz : {d:^10.5} | {d:^10.5} | {d:^10.5}\n", .{ i * freq_multiple, f.re, f.im, math.pow(f32, f.magnitude(), 2.0) });
+pub fn normalizeFFT(freqs: []Complex(f32), amplitudes: []f32) void {
+    var i: usize = 0;
+    while (i < FFT_SIZE / 2) : (i += 1) {
+        // const res: f32 = freqs[i].magnitude() / @as(f32, @floatFromInt(1 / math.sqrt(freqs.len)));
+        const mag: f32 = freqs[i].magnitude();
+        amplitudes[i] = mag;
     }
 }
 
@@ -317,142 +368,31 @@ pub fn getPeakPower(freqs: []f32, start: usize, end: usize) f32 {
     return peak_power;
 }
 
-pub fn drawFFT(amps: []f32, bin_width: f32, h: f32, w: f32) void {
-    const max_bins: f32 = @floatFromInt(MAX_FREQUENCY_BINS);
-    const dt: f32 = rl.GetFrameTime();
-    var cur: f32 = 1;
-    const bins_per_pixel: f32 = (max_bins / bin_width) / w;
-    const half_window: f32 = (2 * w / FFT_SIZE_FLOAT) * FFT_SIZE_FLOAT / 4;
-    // var step: f32 = math.pow(f32, 10, @log10(FFT_SIZE_FLOAT / 4) / (w / 15));
-    var step: f32 = 1.0;
-    var start_step: f32 = 1.0;
-    // FREQUENCY RESOLUTION = fs / N => 48k / 8192 => 5.85 Hz
-    // Each bin should be 5.85 Hz, so we have 4096 * 5.85 => 24,000 Hz of Frequencies.
-    // We need to display 24,000 Frequencies in an 600 pixel window but logarithmically view their presence.
-    // So that way frequencies from 1 - 3000 are about the same as the frequencies from 3001-24000
-    while (cur < (FFT_SIZE_FLOAT / 2)) : (cur = @ceil(start_step + cur * step)) {
-        if (cur > (half_window) and start_step != 0) {
-            step = math.pow(f32, 10, @log10((FFT_SIZE_FLOAT / 2) / (FFT_SIZE_FLOAT / 4)) / (1 * w / 5));
-            start_step = 0;
+pub fn renderFFT(freqs: []f32, bar_width: f32, height: f32, width: f32) void {
+    var curr: f32 = 0;
+    _ = bar_width;
+    while (curr < FFT_SIZE_FLOAT / 2) : (curr += FREQ_STEP) {
+        const x_position: f32 = if (curr < 4) curr * FREQ_STEP else curr + FREQ_STEP;
+        const idx: usize = @intFromFloat(curr);
+        const max_value: f32 = getPeakPower(freqs, idx, @as(usize, (@intFromFloat(@ceil(curr + RESOLUTION)))));
+        const last_value: f32 = global_container.last_amp[idx];
+        var smoothed: f32 = undefined;
+        if (last_value < max_value) {
+            smoothed = last_value * 0.1 + (0.8 * max_value);
+        } else {
+            smoothed = last_value * 0.8 + (0.2 * max_value);
         }
-        const i: usize = @intFromFloat(cur);
-        const bpp: usize = @intFromFloat(@ceil(start_step + cur * step));
-
-        const power: f32 = getPeakPower(amps, i, bpp);
-
-        const smoothed_power: f32 = (last_frames_amp[i] * 0.5 + 0.2 * power) * (50 * h / 3) * dt;
-        renderDrawings(cur, bins_per_pixel, bin_width, smoothed_power, h, w);
-        last_frames_amp[i] += (power - last_frames_amp[i]);
+        if (smoothed < 0) continue;
+        drawBars(@floor(x_position), smoothed, height, width);
+        if (idx == 0) continue;
+        global_container.last_amp[idx] = max_value;
     }
 }
 
-// const adjusted_power: f32 = @sqrt(power * cur) / w;
-// std.debug.print("{d}-{d} : {d} \n", .{ i, i + bpp, power });
-// std.debug.print("cur/power: {d} / {d} \n", .{ cur, power });
-// const power = if (cur_power == prev_pow) cur_power * @log2(cur) * 1.2 else cur_power;
-// std.debug.print("bin_width: {d} -- bins_per_pixel: {d}\n", .{ bin_width, bins_per_pixel });
-pub fn renderDrawings(index: f32, frequency_bin: f32, bin_width: f32, power: f32, win_height: f32, win_width: f32) void {
-    _ = frequency_bin;
-    const height_float: f32 = power;
-    const x_float: f32 = index;
-    const y_float: f32 = ((win_height - height_float)); //+ (index * 90 / FFT_SIZE_FLOAT / 2)));
-    const ipow: f32 = index * power;
-    // const circle_center: rl.Vector2 = rl.Vector2{ .x = win_width / 2, .y = win_height / 3 };
-    // const circle_radius: f32 = @mod(power * index, 200);
-    const drop_x: f32 = if (index > FFT_SIZE_FLOAT / 4) @mod(ipow * 0.005, (win_width - win_width / 3)) else @mod(ipow * 0.005, 2 * win_width / 3);
-    const drops_center: rl.Vector2 = rl.Vector2{ .x = drop_x, .y = @mod(index, win_height / 2) };
-    const drops_radius: f32 = @mod(@sqrt(power), win_height * 0.01);
-
-    // const height: i32 = @intFromFloat(height_float);
-    // const width: i32 = @intFromFloat(bin_width); //* ((half_ft - index) / half_ft));
-    // const y_pos: i32 = @intFromFloat(y_float);
-    // const x_pos: i32 = @intFromFloat(x_float);
-    const color = rl.ColorFromHSV(@mod(index * 0.2, 350), 0.6, 0.9);
-    const start_position = rl.Vector2{ .x = x_float, .y = y_float };
-    const end_position = rl.Vector2{ .x = x_float, .y = win_height };
-
-    // std.debug.print("Index: {d} | Height: {d} \n", .{ index, height_float });
-    // rl.DrawRectangle(x_pos, y_pos, width, height, color);
-    rl.DrawLineEx(start_position, end_position, bin_width / 2, color);
-    rl.DrawCircleV(drops_center, drops_radius, color);
-    // rl.DrawRing(circle_center, @mod(power, 150), circle_radius, 0, 360, 6, color);
-    // rl.DrawCircleV(circle_center, circle_radius, color);
-    // rl.DrawCircleV(start_position, @sqrt((bin_width * height_float) / 20), color);
+pub fn drawBars(x_pos: f32, power: f32, height: f32, width: f32) void {
+    const centered_x: f32 = if (@mod(x_pos, 2) == 0) @mod((width / 2) + x_pos, width) else @mod((width / 2) - x_pos, width);
+    const bar_color = rl.ColorFromHSV(@mod(centered_x * 0.5, 360), 0.7, 0.8);
+    const start = rl.Vector2{ .x = centered_x, .y = height - (power * 2.5) };
+    const end = rl.Vector2{ .x = centered_x, .y = height };
+    rl.DrawLineEx(start, end, RESOLUTION, bar_color);
 }
-//
-// const normalizer_ratio: Complex(f32) = Complex(f32).init(1.0, 0).div(amp);
-// pub fn callback(buf: ?*anyopaque, frames: u32) callconv(.C) void {
-//     const capacity = global_frames.len;
-//     if (frames > 0) {
-//         const bp: *[1024]Sample = @alignCast(@ptrCast(buf.?));
-//         const frame = if (frames > global_frames.len) global_frames.len else frames;
-//         if (frame > global_frame_count or global_frame_count > capacity) {
-//             global_frames = std.mem.zeroes([1024]Sample);
-//         }
-//         for (bp, 0..1024) |samp, i| {
-//             global_frames[i] = samp;
-//         }
-//         global_frame_count = frame;
-//     }
-//
-// }
-
-// for (global_frames, 0..) |sample, i| {
-//     const s: f32 = sample.chan1;
-//     const h: f32 = @floatFromInt(rl.GetRenderHeight());
-//     const m: f32 = @floatFromInt(i);
-//     const x_pos: i32 = @intFromFloat(cell_width * m);
-//     const y_pos: i32 = if (s > 0) std.math.lossyCast(i32, h / 2 - h / 2 * s) else @intFromFloat(h / 2);
-//     const rect_height: i32 = if (s > 0) std.math.lossyCast(i32, (h / 2 * s)) else std.math.lossyCast(i32, (h / 2 * s * (-1.0)));
-//     rl.DrawRectangle(x_pos, y_pos, @intFromFloat(cell_width * 2), rect_height, rl.RED);
-// }
-//pub fn drawMusic(freqs: []Complex(f32), cell_width: f32, h: f32, w: f32) void {
-//     var max_amplitude: f32 = 0;
-//     _ = max_amplitude;
-//     const WINDOW_MAX: f32 = w / cell_width;
-//     // x ^ ( 1/ Samples/second)
-//     const SMOOTHING_FACTOR = math.pow(f32, 10, 1 / 441);
-//     var max_power: f32 = 0;
-//     var f: f32 = LOW_FREQ;
-//     // for (freqs) |freq| {
-//     //     if (@fabs(freq.magnitude()) > max_amplitude) max_amplitude = (freq.magnitude());
-//     // }
-//     for (freqs) |freq| {
-//         const power: f32 = freq.im * freq.re;
-//         if (power > max_power) max_power = power;
-//     }
-//     // if (max_amplitude == 0) return;
-//     var cur: f32 = 0;
-//     while (f < FFT_SIZE_FLOAT) : (f = @ceil(f * FREQUENCY_STEP)) {
-//         // var avg_amp: f32 = 0;
-//         var current_power: f32 = 0;
-//         var middle_freqs: f32 = f;
-//         while (middle_freqs < @ceil(f * FREQUENCY_STEP) and middle_freqs < FFT_SIZE_FLOAT) : (middle_freqs += 1) {
-//             const f_idx: usize = @intFromFloat(@floor(middle_freqs));
-//             const p = freqs[f_idx].re * freqs[f_idx].im;
-//             current_power = @max(current_power, p);
-//         }
-//         if (max_power == 0) return;
-//         const bin_position: f32 = math.pow(f32, (f / FFT_SIZE_FLOAT), 1.0 / 2.0) * WINDOW_MAX;
-//         const bin: usize = @intFromFloat(bin_position);
-//         const amp: f32 = @fabs(magToDecibels(current_power, 1.0) / magToDecibels(max_power, 1.0));
-//         const smoothed_amp: f32 = last_frames_amp[bin] * SMOOTHING_FACTOR + amp * (1 - SMOOTHING_FACTOR);
-//         const x_pos: i32 = @intFromFloat(@floor(cell_width * bin_position));
-//         const y_pos: i32 = @intFromFloat(@floor(h - @floor(h / 2.0 * smoothed_amp)));
-//         const height: i32 = @intFromFloat(@floor(smoothed_amp * h / 2.0));
-//         const width: i32 = @intFromFloat(amp * cell_width);
-//         const color = rl.ColorFromHSV(@mod(cur * 2, 350), 0.6, 0.9);
-//         // if (amp > 1) std.debug.print("POSITIVE -> Total Amp: {d} gotten from AVERAGE: {d} and MAX: {d}\n", .{ amp, amp_sum, max_sum });
-//         // if (amp < 0) std.debug.print("NEGATIVE -> Total Amp: {d} gotten from AVERAGE: {d} and MAX: {d}\n", .{ amp, current_power, max_power });
-//         // std.debug.print("CURRENT: {d} | FREQUENCY: {d} | AMP: {d:.16} |  x_pos: {d:.3} | y_pos: {d:.3} | height: {d:.3} | color = {any} \n", .{ cur, f, amp, x_pos, y_pos, height, color });
-//         // rl.DrawCircle(x_pos, y_pos, amp * (h / 10), color);
-//         // const amp_sum: f32 = magToDecibels(avg_amp, 1.0);
-//         // const max_sum: f32 = magToDecibels(max_amplitude, 1.0);
-//         // const amp: f32 = if (@fabs(amp_sum / max_sum) < 1) @fabs(amp_sum / max_sum) else 0.01;
-//
-//         rl.DrawRectangle(x_pos, y_pos, width, height, color);
-//         last_frames_amp[bin] = amp;
-//         cur += 1;
-//     }
-//     // std.debug.print("Final Cur -> {d} | Final Freq -> {d}\n", .{ cur, f });
-// }
